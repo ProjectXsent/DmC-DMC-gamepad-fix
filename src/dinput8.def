@@ -1,0 +1,6 @@
+; The game imports DirectInput8Create BY NAME from DINPUT8.dll.
+LIBRARY dinput8
+EXPORTS
+    DirectInput8Create
+    DllCanUnloadNow     PRIVATE
+    DllGetClassObject   PRIVATE

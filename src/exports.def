@@ -1,0 +1,14 @@
+; Mirrors the export table of the real xinput1_3.dll (names AND ordinals).
+; The game imports XInputGetState / XInputSetState by ordinal 2 and 3.
+; Verify against your system with:
+;   python tools/inspect_imports.py --exports C:\Windows\SysWOW64\xinput1_3.dll
+LIBRARY xinput1_3
+EXPORTS
+    XInputGetState                  @2
+    XInputSetState                  @3
+    XInputGetCapabilities           @4
+    XInputEnable                    @5
+    XInputGetDSoundAudioDeviceGuids @6
+    XInputGetBatteryInformation     @7
+    XInputGetKeystroke              @8
+    DmcInSdlCall
