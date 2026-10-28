@@ -5,6 +5,14 @@
 #include "sdl_backend.h"
 #include "log.h"
 
+// Threading model
+// ---------------
+// SDL is initialised, pumped and shut down on ONE background worker thread. The game's
+// thread never calls into SDL: it only copies a cached PadSnapshot (ReadSlot) or posts a
+// rumble request (Rumble) under a tiny lock. Previously SDL_Init ran inside the game's
+// first XInput call (~90 ms, window/device creation = lost focus + busy cursor) and
+// SDL_PumpEvents ran on the game's thread every frame (multi-ms stalls).
+
 namespace dmc { namespace sdlb {
 
 namespace {
@@ -12,7 +20,10 @@ namespace {
 struct Slot {
     SDL_Gamepad*   pad = nullptr;
     SDL_JoystickID id = 0;
-    uint16_t       low = 0, high = 0;   // last rumble request
+    bool           connected = false;   // cached SDL_GamepadConnected()
+    PadSnapshot    snap;                // cached state, refreshed by the worker
+    uint16_t       low = 0, high = 0;   // last rumble request from the game
+    bool           rumble_dirty = false;
     ULONGLONG      rumble_tick = 0;
 };
 
@@ -20,14 +31,23 @@ struct Slot {
 // effect and refresh it before it expires while the game keeps it non-zero.
 constexpr Uint32    kRumbleDurationMs = 60000;
 constexpr ULONGLONG kRumbleRefreshMs  = 30000;
-constexpr double    kPumpIntervalMs   = 1.0;
+constexpr Uint32    kPollDelayMs      = 2;
 
-Slot            g_slots[kMaxUsers];
-Config          g_cfg;
-RealConnectedFn g_probe = nullptr;
-bool            g_ready = false;
-LARGE_INTEGER   g_freq, g_lastPump;
+CRITICAL_SECTION g_slotLock;   // guards every Slot field except `pad`/`id` mutation order (see below)
+Slot             g_slots[kMaxUsers];
+Config           g_cfg;
+RealConnectedFn  g_probe = nullptr;
+std::string      g_mappingsPath;
+volatile LONG    g_started = 0;
+volatile LONG    g_ready = 0;
+volatile LONG    g_workerTid = 0;
 
+struct Lock {
+    Lock()  { EnterCriticalSection(&g_slotLock); }
+    ~Lock() { LeaveCriticalSection(&g_slotLock); }
+};
+
+// Only the worker thread ever changes pad/id, so the worker may read them without the lock.
 int FindSlotById(SDL_JoystickID id) {
     for (int i = 0; i < kMaxUsers; ++i)
         if (g_slots[i].pad && g_slots[i].id == id) return i;
@@ -37,6 +57,14 @@ int FindSlotById(SDL_JoystickID id) {
 void AddPad(SDL_JoystickID id) {
     if (FindSlotById(id) >= 0) return;
     if (!SDL_IsGamepad(id)) return;
+
+    // Log every gamepad SDL sees, including ones we skip, to diagnose "pad X does nothing".
+    {
+        const char* nm = SDL_GetGamepadNameForID(id);
+        log::Write("SDL gamepad id=%u '%s' vid=%04X pid=%04X type=%d", (unsigned)id, nm ? nm : "?",
+                   (unsigned)SDL_GetGamepadVendorForID(id), (unsigned)SDL_GetGamepadProductForID(id),
+                   (int)SDL_GetGamepadTypeForID(id));
+    }
 
     if (g_cfg.ignore_xbox_pads) {
         SDL_GamepadType t = SDL_GetGamepadTypeForID(id);
@@ -54,11 +82,17 @@ void AddPad(SDL_JoystickID id) {
         if (!g_slots[i].pad) slot = i;
     if (slot < 0) { log::Write("no free slot for pad id=%u", (unsigned)id); return; }
 
-    SDL_Gamepad* pad = SDL_OpenGamepad(id);
+    double t0 = log::NowMs();
+    SDL_Gamepad* pad = SDL_OpenGamepad(id);   // outside the lock: may take a while
+    log::Write("SDL_OpenGamepad took %.1f ms", log::NowMs() - t0);
     if (!pad) { log::Write("SDL_OpenGamepad failed: %s", SDL_GetError()); return; }
-    g_slots[slot] = Slot();
-    g_slots[slot].pad = pad;
-    g_slots[slot].id = id;
+    {
+        Lock l;
+        g_slots[slot] = Slot();
+        g_slots[slot].pad = pad;
+        g_slots[slot].id = id;
+        g_slots[slot].connected = true;
+    }
     log::Write("pad '%s' -> user %d", SDL_GetGamepadName(pad) ? SDL_GetGamepadName(pad) : "?", slot);
 }
 
@@ -66,8 +100,13 @@ void RemovePad(SDL_JoystickID id) {
     int s = FindSlotById(id);
     if (s < 0) return;
     log::Write("pad removed from user %d", s);
-    SDL_CloseGamepad(g_slots[s].pad);
-    g_slots[s] = Slot();
+    SDL_Gamepad* pad;
+    {
+        Lock l;               // unpublish first so the game thread can no longer reach it
+        pad = g_slots[s].pad;
+        g_slots[s] = Slot();
+    }
+    SDL_CloseGamepad(pad);
 }
 
 void ScanExisting() {
@@ -78,70 +117,7 @@ void ScanExisting() {
     SDL_free(ids);
 }
 
-}  // namespace
-
-bool Init(const Config& cfg, const std::string& mappingsPathUtf8, RealConnectedFn probe) {
-    g_cfg = cfg;
-    g_probe = probe;
-
-    // Defaults first, so the [Hints] section can override them.
-    // SDL must never call XInput itself: that could load *this* proxy again and
-    // would double-list Xbox pads.
-    SDL_SetHint("SDL_XINPUT_ENABLED", "0");
-    SDL_SetHint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
-    SDL_SetHint("SDL_JOYSTICK_WGI", "0");
-    for (const auto& h : cfg.hints) SDL_SetHint(h.first.c_str(), h.second.c_str());
-
-    if (!SDL_Init(SDL_INIT_GAMEPAD)) {
-        log::Write("SDL_Init failed: %s", SDL_GetError());
-        return false;
-    }
-
-    if (!mappingsPathUtf8.empty()) {
-        int n = SDL_AddGamepadMappingsFromFile(mappingsPathUtf8.c_str());
-        if (n >= 0) log::Write("loaded %d mappings from %s", n, mappingsPathUtf8.c_str());
-        else log::Write("no extra mappings loaded (%s)", SDL_GetError());
-    }
-
-    QueryPerformanceFrequency(&g_freq);
-    QueryPerformanceCounter(&g_lastPump);
-    g_ready = true;
-    ScanExisting();
-    log::Write("SDL backend ready");
-    return true;
-}
-
-void Pump() {
-    if (!g_ready) return;
-    LARGE_INTEGER now; QueryPerformanceCounter(&now);
-    double ms = (double)(now.QuadPart - g_lastPump.QuadPart) * 1000.0 / (double)g_freq.QuadPart;
-    if (ms < kPumpIntervalMs) return;
-    g_lastPump = now;
-
-    SDL_Event ev;
-    while (SDL_PollEvent(&ev)) {
-        if (ev.type == SDL_EVENT_GAMEPAD_ADDED) AddPad(ev.gdevice.which);
-        else if (ev.type == SDL_EVENT_GAMEPAD_REMOVED) RemovePad(ev.gdevice.which);
-    }
-
-    ULONGLONG t = GetTickCount64();
-    for (auto& s : g_slots) {
-        if (s.pad && (s.low || s.high) && t - s.rumble_tick > kRumbleRefreshMs) {
-            SDL_RumbleGamepad(s.pad, s.low, s.high, kRumbleDurationMs);
-            s.rumble_tick = t;
-        }
-    }
-}
-
-bool SlotActive(int user) {
-    return g_ready && user >= 0 && user < kMaxUsers && g_slots[user].pad &&
-           SDL_GamepadConnected(g_slots[user].pad);
-}
-
-bool ReadSlot(int user, PadSnapshot& out) {
-    if (!SlotActive(user)) return false;
-    SDL_Gamepad* p = g_slots[user].pad;
-
+bool ReadFromSdl(SDL_Gamepad* p, PadSnapshot& out) {
     static const struct { SDL_GamepadButton sb; uint32_t pb; } map[] = {
         {SDL_GAMEPAD_BUTTON_SOUTH, PB_SOUTH}, {SDL_GAMEPAD_BUTTON_EAST, PB_EAST},
         {SDL_GAMEPAD_BUTTON_WEST, PB_WEST},   {SDL_GAMEPAD_BUTTON_NORTH, PB_NORTH},
@@ -160,22 +136,153 @@ bool ReadSlot(int user, PadSnapshot& out) {
     out.ry = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHTY);
     out.lt = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFT_TRIGGER);
     out.rt = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
+    return SDL_GamepadConnected(p);
+}
+
+// One iteration of the worker: pump SDL, refresh cached state, push rumble.
+void Tick() {
+    const bool timing = log::Enabled();
+    const double p0 = timing ? log::NowMs() : 0.0;
+    SDL_Event ev;
+    while (SDL_PollEvent(&ev)) {
+        if (ev.type == SDL_EVENT_GAMEPAD_ADDED) AddPad(ev.gdevice.which);
+        else if (ev.type == SDL_EVENT_GAMEPAD_REMOVED) RemovePad(ev.gdevice.which);
+    }
+    if (timing) {
+        static LONG slowPumps = 0;
+        double dt = log::NowMs() - p0;
+        if (dt >= 8.0 && InterlockedIncrement(&slowPumps) <= 20)
+            log::Write("slow SDL pump: %.1f ms on the SDL worker thread (harmless to the game)", dt);
+    }
+
+    const ULONGLONG now = GetTickCount64();
+    for (int i = 0; i < kMaxUsers; ++i) {
+        SDL_Gamepad* pad = g_slots[i].pad;      // only this thread changes it
+        if (!pad) continue;
+
+        PadSnapshot snap;
+        bool connected = ReadFromSdl(pad, snap);
+
+        uint16_t lo, hi; bool push;
+        {
+            Lock l;
+            g_slots[i].snap = snap;
+            g_slots[i].connected = connected;
+            lo = g_slots[i].low; hi = g_slots[i].high;
+            push = g_slots[i].rumble_dirty ||
+                   ((lo || hi) && now - g_slots[i].rumble_tick > kRumbleRefreshMs);
+            if (push) { g_slots[i].rumble_dirty = false; g_slots[i].rumble_tick = now; }
+        }
+        if (push) {
+            if (lo == 0 && hi == 0) SDL_RumbleGamepad(pad, 0, 0, 0);
+            else SDL_RumbleGamepad(pad, lo, hi, kRumbleDurationMs);
+        }
+    }
+}
+
+DWORD WINAPI Worker(LPVOID) {
+    InterlockedExchange(&g_workerTid, (LONG)GetCurrentThreadId());   // before any SDL call: see WorkerThreadId()
+
+    // Defaults first, so the [Hints] section can override them.
+    // SDL must never call XInput itself: that could load *this* proxy again and
+    // would double-list Xbox pads.
+    SDL_SetHint("SDL_XINPUT_ENABLED", "0");
+    SDL_SetHint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
+    SDL_SetHint("SDL_JOYSTICK_WGI", "0");
+    // Xbox pads belong to the real XInput driver. With XInput disabled above, SDL would
+    // otherwise try to drive them itself through its HIDAPI Xbox drivers.
+    SDL_SetHint("SDL_JOYSTICK_HIDAPI_XBOX", "0");
+    SDL_SetHint("SDL_JOYSTICK_HIDAPI_XBOX_360", "0");
+    SDL_SetHint("SDL_JOYSTICK_HIDAPI_XBOX_ONE", "0");
+    for (const auto& h : g_cfg.hints) SDL_SetHint(h.first.c_str(), h.second.c_str());
+
+    double t0 = log::NowMs();
+    bool initOk = SDL_Init(SDL_INIT_GAMEPAD);
+    log::Write("SDL_Init(gamepad) took %.1f ms on worker thread %lu", log::NowMs() - t0, GetCurrentThreadId());
+    if (!initOk) {
+        log::Write("SDL_Init failed: %s", SDL_GetError());
+        return 1;
+    }
+
+    if (!g_mappingsPath.empty()) {
+        t0 = log::NowMs();
+        int n = SDL_AddGamepadMappingsFromFile(g_mappingsPath.c_str());
+        log::Write("loading mappings took %.1f ms", log::NowMs() - t0);
+        if (n >= 0) log::Write("loaded %d mappings from %s", n, g_mappingsPath.c_str());
+        else log::Write("no extra mappings loaded (%s)", SDL_GetError());
+    }
+
+    t0 = log::NowMs();
+    ScanExisting();
+    log::Write("initial device scan took %.1f ms", log::NowMs() - t0);
+    InterlockedExchange(&g_ready, 1);
+    log::Write("SDL backend ready");
+
+    for (;;) {
+        Tick();
+        SDL_Delay(kPollDelayMs);
+    }
+}
+
+}  // namespace
+
+// Id of the SDL worker thread (0 until it starts). The DirectInput filter treats
+// every call made on this thread as SDL's own, so SDL's enumeration is never hidden.
+// (Move this declaration into sdl_backend.h if you prefer.)
+unsigned long WorkerThreadId() { return (unsigned long)InterlockedCompareExchange(&g_workerTid, 0, 0); }
+
+// Non-blocking: starts the worker and returns. Until the worker reports ready,
+// SlotActive()/ReadSlot() say "no pad", so the shim just answers from real XInput.
+bool Init(const Config& cfg, const std::string& mappingsPathUtf8, RealConnectedFn probe) {
+    if (InterlockedExchange(&g_started, 1)) return true;
+    InitializeCriticalSection(&g_slotLock);
+    g_cfg = cfg;
+    g_probe = probe;
+    g_mappingsPath = mappingsPathUtf8;
+
+    HANDLE h = CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr);
+    if (!h) {
+        log::Write("could not start the SDL worker thread (error %lu)", GetLastError());
+        return false;
+    }
+    CloseHandle(h);
+    log::Write("SDL worker thread started; game thread no longer blocks on SDL");
+    return true;
+}
+
+// Kept for API compatibility: the worker thread pumps SDL now.
+void Pump() {}
+
+bool SlotActive(int user) {
+    if (!InterlockedCompareExchange(&g_ready, 0, 0) || user < 0 || user >= kMaxUsers) return false;
+    Lock l;
+    return g_slots[user].pad && g_slots[user].connected;
+}
+
+bool ReadSlot(int user, PadSnapshot& out) {
+    if (!InterlockedCompareExchange(&g_ready, 0, 0) || user < 0 || user >= kMaxUsers) return false;
+    Lock l;
+    if (!g_slots[user].pad || !g_slots[user].connected) return false;
+    out = g_slots[user].snap;
     return true;
 }
 
 bool Rumble(int user, uint16_t low, uint16_t high) {
-    if (!SlotActive(user)) return false;
+    if (!InterlockedCompareExchange(&g_ready, 0, 0) || user < 0 || user >= kMaxUsers) return false;
+    Lock l;
     Slot& s = g_slots[user];
-    s.low = low; s.high = high; s.rumble_tick = GetTickCount64();
-    if (low == 0 && high == 0) SDL_RumbleGamepad(s.pad, 0, 0, 0);
-    else SDL_RumbleGamepad(s.pad, low, high, kRumbleDurationMs);
+    if (!s.pad || !s.connected) return false;
+    s.low = low; s.high = high; s.rumble_dirty = true;   // applied by the worker within ~2 ms
     return true;
 }
 
 void StopAllRumble() {
+    if (!InterlockedCompareExchange(&g_ready, 0, 0)) return;
+    Lock l;
     for (auto& s : g_slots) {
-        if (s.pad) SDL_RumbleGamepad(s.pad, 0, 0, 0);
+        if (!s.pad) continue;
         s.low = s.high = 0;
+        s.rumble_dirty = true;
     }
 }
 

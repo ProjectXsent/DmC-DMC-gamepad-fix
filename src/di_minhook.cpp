@@ -22,9 +22,12 @@ const char*    g_where = "";           // set if hooking a non-System32 dinput8.
 
 // Runs on the game's thread whenever it calls DirectInput8Create.
 HRESULT WINAPI Detour(HINSTANCE inst, DWORD version, REFIID riid, LPVOID* out, void* outer) {
+    const double t0 = log::NowMs();
     HRESULT hr = g_orig(inst, version, riid, out, outer);
+    const double origMs = log::NowMs() - t0;
     if (hr >= 0 && out && *out) {
         const Config& cfg = ShimConfig();   // loads dmc_sdl.ini + log on first use
+        log::Write("DirectInput8Create: original call took %.1f ms", origMs);
         bool hide = cfg.hide_dinput_pads && cfg.mode != Mode::Passthrough;
         if (hide) {
             dihide::Configure(true, &ShimInSdlCall);

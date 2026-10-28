@@ -18,6 +18,15 @@ void Init(bool enabled, const wchar_t* path) {
                          FILE_ATTRIBUTE_NORMAL, nullptr);
 }
 
+bool Enabled() { return g_file != INVALID_HANDLE_VALUE; }
+
+double NowMs() {
+    static LONGLONG freq = 0;  // benign race: every thread computes the same value
+    if (!freq) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); freq = f.QuadPart; }
+    LARGE_INTEGER c; QueryPerformanceCounter(&c);
+    return (double)c.QuadPart * 1000.0 / (double)freq;
+}
+
 void Write(const char* fmt, ...) {
     if (g_file == INVALID_HANDLE_VALUE) return;
     char buf[1024];

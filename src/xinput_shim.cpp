@@ -22,6 +22,8 @@
 
 using namespace dmc;
 
+namespace dmc { namespace sdlb { unsigned long WorkerThreadId(); } }
+
 namespace {
 
 HMODULE          g_module = nullptr;
@@ -34,6 +36,20 @@ bool             g_sdlOk = false;
 bool             g_enabled = true;     // XInputEnable state
 
 struct SdlSlotState { XInputGamepad last; DWORD packet; bool wasActive; };
+
+// Diagnostic: with log=1, calls that take >= 4 ms are written to dmc_sdl.log (first 40 only).
+// A long call on the game's thread is what looks like a freeze / lost focus.
+volatile LONG g_slowCount = 0;
+struct SlowScope {
+    const char* what; DWORD user; double t0; bool on;
+    SlowScope(const char* w, DWORD u) : what(w), user(u), t0(0.0), on(log::Enabled()) { if (on) t0 = log::NowMs(); }
+    ~SlowScope() {
+        if (!on) return;
+        double dt = log::NowMs() - t0;
+        if (dt >= 4.0 && InterlockedIncrement(&g_slowCount) <= 40)
+            log::Write("slow %s (user %lu): %.1f ms on thread %lu", what, user, dt, GetCurrentThreadId());
+    }
+};
 SdlSlotState g_state[kMaxUsers];
 
 // RAII: take the lock and mark this thread as "inside SDL". If SDL (or a driver
@@ -43,7 +59,23 @@ struct SdlGuard {
     SdlGuard()  { EnterCriticalSection(&g_lock); InterlockedExchange(&g_busyThread, (LONG)GetCurrentThreadId()); }
     ~SdlGuard() { InterlockedExchange(&g_busyThread, 0); LeaveCriticalSection(&g_lock); }
 };
-bool InSdlCall() { return (DWORD)InterlockedCompareExchange(&g_busyThread, 0, 0) == GetCurrentThreadId(); }
+// True on the game thread while inside SdlGuard AND on the SDL worker thread (which
+// runs SDL_Init/enumeration), so SDL's own DirectInput enumeration is never hidden.
+bool InSdlCall() {
+    const DWORD cur = GetCurrentThreadId();
+    if ((DWORD)InterlockedCompareExchange(&g_busyThread, 0, 0) == cur) return true;
+    const DWORD w = (DWORD)sdlb::WorkerThreadId();
+    return w != 0 && w == cur;
+}
+
+// Log real-XInput connect/disconnect transitions per user (only when log=true).
+volatile LONG g_realSeen[kMaxUsers];   // 0 = unseen, 1 = not connected, 2 = connected
+void NoteReal(DWORD user, DWORD r) {
+    if (!log::Enabled()) return;
+    LONG now = (r == XERR_SUCCESS) ? 2 : 1;
+    if (InterlockedExchange(&g_realSeen[user], now) != now)
+        log::Write("real XInput user %lu: %s (code %lu)", user, now == 2 ? "connected" : "not connected", r);
+}
 
 bool RealProbe(int user) {
     XInputState s;
@@ -66,6 +98,7 @@ void LoadConfigLocked() {
 }
 
 void DoInit() {
+    const double init0 = log::NowMs();
     ShimConfig();  // no-op if the DirectInput detour already loaded it
     std::wstring dir = winutil::ModuleDir(g_module);
 #ifdef DMC_DI_MINHOOK
@@ -82,6 +115,8 @@ void DoInit() {
         g_sdlOk = sdlb::Init(g_cfg, mp, g_cfg.mode == Mode::Hybrid ? &RealProbe : nullptr);
         if (!g_sdlOk) log::Write("SDL unavailable; falling back to real XInput only");
     }
+    log::Write("first XInput call: init took %.1f ms total, on thread %lu (the game blocks for this long)",
+               log::NowMs() - init0, GetCurrentThreadId());
 }
 
 // Lazy, one-time init on the first XInput call. Never runs in DllMain (loader
@@ -108,7 +143,6 @@ bool SdlFirst() { return g_cfg.mode == Mode::Sdl || g_cfg.prefer_sdl; }
 // Reads + maps the SDL pad in `user`'s slot. False when no pad is present.
 bool ReadSdl(DWORD user, XInputState* out) {
     SdlGuard guard;
-    sdlb::Pump();
     PadSnapshot snap;
     SdlSlotState& st = g_state[user];
     if (!sdlb::ReadSlot((int)user, snap)) { st.wasActive = false; return false; }
@@ -122,9 +156,7 @@ bool ReadSdl(DWORD user, XInputState* out) {
 }
 
 bool SdlActive(DWORD user) {
-    SdlGuard guard;
-    sdlb::Pump();
-    return sdlb::SlotActive((int)user);
+    return sdlb::SlotActive((int)user);   // cached state; never touches SDL on the game thread
 }
 
 enum class Src { Real, Sdl };
@@ -172,15 +204,20 @@ DWORD WINAPI XInputGetState(DWORD user, XInputState* state) {
     if (!EnsureInit() || InSdlCall() || !UseSdl()) return real::GetState(user, state);
 
     if (!SdlFirst()) {
-        DWORD r = real::GetState(user, state);
+        DWORD r;
+        { SlowScope s("real XInputGetState", user); r = real::GetState(user, state); }
         InterlockedExchange(&g_realOk[user], r == XERR_SUCCESS);
+        NoteReal(user, r);
         if (r == XERR_SUCCESS) return r;
     }
-    if (ReadSdl(user, state)) return XERR_SUCCESS;
+    bool gotSdl;
+    { SlowScope s("SDL read (lock wait + pump)", user); gotSdl = ReadSdl(user, state); }
+    if (gotSdl) return XERR_SUCCESS;
     if (g_cfg.mode == Mode::Sdl) return XERR_DEVICE_NOT_CONNECTED;
     if (SdlFirst()) {
         DWORD r = real::GetState(user, state);
         InterlockedExchange(&g_realOk[user], r == XERR_SUCCESS);
+        NoteReal(user, r);
         return r;
     }
     return XERR_DEVICE_NOT_CONNECTED;
