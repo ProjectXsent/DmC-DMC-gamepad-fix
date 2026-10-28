@@ -2,6 +2,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include "real_xinput.h"
+#include "build_config.h"
 #include "log.h"
 
 namespace dmc { namespace real {
@@ -38,9 +39,9 @@ bool Load() {
     wchar_t path[MAX_PATH];
     UINT n = GetSystemDirectoryW(path, MAX_PATH);  // SysWOW64 for a 32-bit process
     if (n == 0 || n > MAX_PATH - 20) return false;
-    lstrcatW(path, L"\\xinput1_3.dll");
+    lstrcatW(path, L"\\" DMC_XINPUT_FILE_W);
     g_mod = LoadLibraryW(path);
-    if (!g_mod) { log::Write("real xinput1_3.dll not found (err %lu)", GetLastError()); return false; }
+    if (!g_mod) { log::Write("real %ls not found (err %lu)", DMC_XINPUT_FILE_W, GetLastError()); return false; }
     p_GetState  = (PFN_GetState) Resolve("XInputGetState", 2);
     p_SetState  = (PFN_SetState) Resolve("XInputSetState", 3);
     p_GetCaps   = (PFN_GetCaps)  Resolve("XInputGetCapabilities", 4);
@@ -48,7 +49,7 @@ bool Load() {
     p_DSound    = (PFN_DSound)   Resolve("XInputGetDSoundAudioDeviceGuids", 6);
     p_Battery   = (PFN_Battery)  Resolve("XInputGetBatteryInformation", 7);
     p_Keystroke = (PFN_Keystroke)Resolve("XInputGetKeystroke", 8);
-    log::Write("real xinput1_3 loaded: GetState=%p SetState=%p", (void*)p_GetState, (void*)p_SetState);
+    log::Write("real %ls loaded: GetState=%p SetState=%p", DMC_XINPUT_FILE_W, (void*)p_GetState, (void*)p_SetState);
     return true;
 }
 

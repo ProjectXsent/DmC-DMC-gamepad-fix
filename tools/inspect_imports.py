@@ -6,7 +6,7 @@ Usage:
   inspect_imports.py --dumpbin dump.txt       # same, from `dumpbin /imports` text
   inspect_imports.py --exports XINPUT.dll     # list a DLL's exports (name + ordinal)
   inspect_imports.py --exports OUR.dll --expect-ordinals 2,3   # CI check (exit 1 on miss)
-  inspect_imports.py --exports OUR.dll --expect-names DirectInput8Create
+  inspect_imports.py --exports OUR.dll --expect-names XInputGetState,XInputSetState
 
 Imports of interest are flagged so you can tell which DLL a shim must proxy.
 """

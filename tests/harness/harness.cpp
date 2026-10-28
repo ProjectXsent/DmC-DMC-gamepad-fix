@@ -1,9 +1,11 @@
-// 32-bit smoke-test harness. Loads ./xinput1_3.dll by full path and calls
-// XInputGetState / XInputSetState BY ORDINAL (2 and 3) -- exactly how the game
-// imports them -- then prints pad state.  Usage:  xinput_harness [--rumble] [--seconds N]
+// Smoke-test harness (build bitness must match the proxy). Loads the proxy DLL from
+// its own folder and calls XInputGetState / XInputSetState -- by name, falling back
+// to ordinals 2 and 3 (how the 32-bit DmC exe imports them) -- then prints pad state.
+// Usage:  xinput_harness [--rumble] [--seconds N]
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include "../../src/build_config.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -28,13 +30,15 @@ int main(int argc, char** argv) {
     GetModuleFileNameW(nullptr, path, MAX_PATH);
     wchar_t* slash = wcsrchr(path, L'\\');
     if (slash) *(slash + 1) = 0;
-    lstrcatW(path, L"xinput1_3.dll");
+    lstrcatW(path, DMC_XINPUT_FILE_W);
 
     HMODULE mod = LoadLibraryW(path);
     if (!mod) { printf("LoadLibrary failed (%lu): %ls\n", GetLastError(), path); return 1; }
-    GetStateFn getState = (GetStateFn)GetProcAddress(mod, MAKEINTRESOURCEA(2));
-    SetStateFn setState = (SetStateFn)GetProcAddress(mod, MAKEINTRESOURCEA(3));
-    if (!getState || !setState) { printf("ordinal 2/3 not exported!\n"); return 2; }
+    GetStateFn getState = (GetStateFn)GetProcAddress(mod, "XInputGetState");
+    SetStateFn setState = (SetStateFn)GetProcAddress(mod, "XInputSetState");
+    if (!getState) getState = (GetStateFn)GetProcAddress(mod, MAKEINTRESOURCEA(2));
+    if (!setState) setState = (SetStateFn)GetProcAddress(mod, MAKEINTRESOURCEA(3));
+    if (!getState || !setState) { printf("XInputGetState/SetState not exported (by name or ordinal 2/3)!\n"); return 2; }
     printf("Loaded %ls; polling for %d s. Press buttons... (Ctrl+C to quit)\n", path, seconds);
 
     DWORD end = GetTickCount() + (DWORD)seconds * 1000;

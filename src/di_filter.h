@@ -2,8 +2,9 @@
 //
 // Why: the game reads gamepads through BOTH XInput and DirectInput. A physical
 // pad therefore shows up twice, and the on-screen prompts flip between generic
-// "Button N" labels (DirectInput) and Xbox glyphs (XInput). The dinput8.dll proxy
-// hides gamepad-class devices from the game's DirectInput enumeration so only
+// "Button N" labels (DirectInput) and Xbox glyphs (XInput). The in-process hook
+// (di_minhook.cpp / di_hide.cpp) hides gamepad-class devices from the game's
+// DirectInput enumeration so only
 // the XInput path (real or SDL-backed) remains.
 #pragma once
 #include <cstddef>

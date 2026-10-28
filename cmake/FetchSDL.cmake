@@ -4,7 +4,7 @@
 #   -DDMC_USE_SYSTEM_SDL=ON   use an installed SDL3 (find_package) instead
 #   -DDMC_SDL_TAG=release-3.x.y   bump the pinned SDL version
 option(DMC_USE_SYSTEM_SDL "Use an installed SDL3 instead of fetching it" OFF)
-set(DMC_SDL_TAG "release-3.2.0" CACHE STRING "SDL3 git tag to fetch (pinned for reproducible builds)")
+set(DMC_SDL_TAG "release-3.4.16" CACHE STRING "SDL3 git tag to fetch (pinned for reproducible builds)")
 
 if(DMC_USE_SYSTEM_SDL)
   find_package(SDL3 REQUIRED CONFIG)

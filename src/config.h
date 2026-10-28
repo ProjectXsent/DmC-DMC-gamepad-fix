@@ -14,7 +14,7 @@ struct Config {
     Mode mode = Mode::Hybrid;
     bool prefer_sdl = false;        // hybrid: an SDL pad shadows a real XInput pad
     bool ignore_xbox_pads = true;   // SDL pads typed Xbox360/XboxOne are left to real XInput
-    bool hide_dinput_pads = true;   // dinput8 proxy hides gamepads from the game's DirectInput
+    bool hide_dinput_pads = true;   // hide gamepad-class devices from the game's DirectInput
     bool log = false;
     std::string mappings_file = "gamecontrollerdb.txt";
     MappingConfig mapping;

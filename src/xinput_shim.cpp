@@ -15,6 +15,10 @@
 #include "real_xinput.h"
 #include "sdl_backend.h"
 #include "winutil.h"
+#ifdef DMC_DI_MINHOOK
+#include "di_hide.h"
+#include "di_minhook.h"
+#endif
 
 using namespace dmc;
 
@@ -46,13 +50,27 @@ bool RealProbe(int user) {
     return real::GetState((uint32_t)user, &s) == XERR_SUCCESS;
 }
 
-void DoInit() {
+bool g_cfgLoaded = false;
+
+// Caller holds g_lock.
+void LoadConfigLocked() {
     std::wstring dir = winutil::ModuleDir(g_module);
     std::string ini = winutil::ReadWholeFile(dir + L"\\dmc_sdl.ini");
     ParseConfigText(ini.c_str(), g_cfg);
     log::Init(g_cfg.log, (dir + L"\\dmc_sdl.log").c_str());
-    log::Write("dmc-sdl-controller starting; mode=%d prefer_sdl=%d ini=%s", (int)g_cfg.mode,
-               (int)g_cfg.prefer_sdl, ini.empty() ? "(missing, defaults)" : "loaded");
+    log::Write("dmc-sdl-controller starting; mode=%d prefer_sdl=%d hide_dinput_pads=%d ini=%s", (int)g_cfg.mode,
+               (int)g_cfg.prefer_sdl, (int)g_cfg.hide_dinput_pads, ini.empty() ? "(missing, defaults)" : "loaded");
+#ifdef DMC_DI_MINHOOK
+    log::Write("DirectInput hook (MinHook): %s", dimh::Status());
+#endif
+}
+
+void DoInit() {
+    ShimConfig();  // no-op if the DirectInput detour already loaded it
+    std::wstring dir = winutil::ModuleDir(g_module);
+#ifdef DMC_DI_MINHOOK
+    dimh::RetryIfNeeded();
+#endif
 
     real::Load();
 
@@ -125,12 +143,27 @@ namespace dmc {
 void ShimAttach(HMODULE self) {
     g_module = self;
     InitializeCriticalSection(&g_lock);
+#ifdef DMC_DI_MINHOOK
+    // The exe imports DINPUT8.dll statically, so it is already mapped. Install the
+    // DirectInput8Create detour now, before any game code can call it.
+    dihide::Attach();
+    dimh::InstallEarly();
+#endif
 }
+
+const Config& ShimConfig() {
+    EnterCriticalSection(&g_lock);
+    if (!g_cfgLoaded) { g_cfgLoaded = true; LoadConfigLocked(); }
+    LeaveCriticalSection(&g_lock);
+    return g_cfg;
+}
+
+bool ShimInSdlCall() { return InSdlCall(); }
 }
 
 // ---------------------------------------------------------------------------
-// Exports. Ordinals are fixed in exports.def to match the real xinput1_3.dll;
-// the game imports XInputGetState/XInputSetState by ordinal (2 and 3).
+// Exports. Names (and, for xinput1_3, ordinals) come from the generated .def;
+// the 32-bit DmC exe imports XInputGetState/XInputSetState by ordinal (2 and 3).
 // ---------------------------------------------------------------------------
 extern "C" {
 
@@ -216,9 +249,5 @@ DWORD WINAPI XInputGetKeystroke(DWORD user, DWORD reserved, void* keystroke) {
         return real::GetKeystroke(user, reserved, keystroke);
     return XERR_EMPTY;  // SDL path produces no keystroke events
 }
-
-// Lets dinput8.dll (our other proxy) tell whether the calling thread is currently
-// inside SDL, so SDL's own DirectInput enumeration is never filtered.
-BOOL WINAPI DmcInSdlCall() { return InSdlCall() ? TRUE : FALSE; }
 
 }  // extern "C"

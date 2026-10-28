@@ -11,8 +11,8 @@ Changes take effect on the next launch.
 | `mode` | `hybrid` | `hybrid`, `sdl`, or `passthrough` (see DESIGN.md). |
 | `prefer_sdl` | `false` | In hybrid, SDL pad wins over a real XInput pad in the same slot. |
 | `ignore_xbox_pads` | `true` | Skip Xbox-type pads in SDL (real XInput serves them). |
-| `hide_dinput_pads` | `true` | `dinput8.dll` hides gamepad-class devices from the game's DirectInput so the pad isn't seen twice. Ignored when `mode = passthrough`. |
-| `log` | `false` | Write `dmc_sdl.log` (xinput proxy) and `dmc_sdl_dinput.log` (dinput8 proxy) next to the DLLs. |
+| `hide_dinput_pads` | `true` | Hides gamepad-class devices from the game's DirectInput (MinHook detour inside the XInput proxy) so the pad isn't seen twice. Ignored when `mode = passthrough`. |
+| `log` | `false` | Write `dmc_sdl.log` next to the DLL (DirectInput hook status, devices, mapping, errors). |
 | `mappings_file` | `gamecontrollerdb.txt` | Extra SDL mappings; relative to the DLL's folder. |
 
 ## [Input]

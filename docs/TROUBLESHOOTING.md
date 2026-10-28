@@ -10,18 +10,22 @@
   `gamecontrollerdb.txt` (generate one with SDL's controller mapping tools).
 
 **Prompts keep switching between generic "Button N" and Xbox glyphs.** The game is reading
-the same pad through DirectInput *and* XInput. Install `dinput8.dll` alongside
-`xinput1_3.dll` (both next to the exe) and keep `hide_dinput_pads = true`. To confirm:
-set `log = true`, start the game, then read `dmc_sdl_dinput.log`:
+the same pad through DirectInput *and* XInput. Keep `hide_dinput_pads = true`, set
+`log = true`, start the game and read `dmc_sdl.log`:
 
-- `DirectInput device type=0x... -> hidden` for your pad → the proxy is working; if prompts
-  still flip, send both logs.
-- no `dinput8 proxy starting` line → `dinput8.dll` isn't being loaded (wrong folder, or a
-  64-bit build?).
+- `DirectInput hook (MinHook): installed` and then `DirectInput device type=0x... -> hidden`
+  for your pad → working. If prompts still flip, send the log.
+- `DirectInput hook (MinHook): MH_ERROR_...` → the detour couldn't be installed (usually
+  because something else already hooks `DirectInput8Create`, e.g. an overlay or another
+  mod). The pad then stays visible to the game's DirectInput; send the log.
+- `WARNING: hooked a dinput8.dll outside the system folder` → there is a `dinput8.dll` in the
+  game folder (left by an older version of this project, or ReShade/another tool). If it is
+  ours from an older version, delete it (and rename `dinput8.dll.dmc-backup` back to
+  `dinput8.dll` if one exists).
 - the pad shows as `-> visible` → its DirectInput type isn't joystick/gamepad class; send
   the type value and we can extend the filter.
-- other overlays/wrappers that also ship a `dinput8.dll` (ReShade, some mod loaders)
-  conflict with this one. Chain them by renaming theirs and tell us which one it is.
+- no `DirectInput device` lines at all → the game never enumerated DirectInput through the
+  hooked function; send the log.
 
 **Buttons are wrong.** Positional mapping is default. Try `swap_ab` / `swap_xy`, or fix
 the pad's mapping in `gamecontrollerdb.txt`.

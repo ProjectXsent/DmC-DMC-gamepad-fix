@@ -1,0 +1,15 @@
+; Generated into the build tree by CMake (see CMakeLists.txt).
+; Exports mirror the real XInput DLL: names always, ordinals only when
+; DMC_EXPORT_ORDINALS=ON (expected xinput1_3 layout: GetState=2, SetState=3, ...).
+; The 32-bit DmC exe imports XInputGetState/XInputSetState by ordinal 2 and 3.
+; Verify against your system with:
+;   python tools/inspect_imports.py --exports C:\Windows\SysWOW64\xinput1_3.dll
+LIBRARY ${DMC_XINPUT_DLL}
+EXPORTS
+    XInputGetState                  ${DMC_ORD_2}
+    XInputSetState                  ${DMC_ORD_3}
+    XInputGetCapabilities           ${DMC_ORD_4}
+    XInputEnable                    ${DMC_ORD_5}
+    XInputGetDSoundAudioDeviceGuids ${DMC_ORD_6}
+    XInputGetBatteryInformation     ${DMC_ORD_7}
+    XInputGetKeystroke              ${DMC_ORD_8}

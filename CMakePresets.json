@@ -1,13 +1,33 @@
 {
   "version": 3,
-  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
   "configurePresets": [
     {
       "name": "win32",
-      "displayName": "Windows 32-bit (the game is x86)",
+      "displayName": "Windows 32-bit (DmC: Devil May Cry is x86)",
       "generator": "Visual Studio 17 2022",
-      "architecture": { "value": "Win32", "strategy": "set" },
+      "architecture": {
+        "value": "Win32",
+        "strategy": "set"
+      },
       "binaryDir": "${sourceDir}/build/win32"
+    },
+    {
+      "name": "win64",
+      "displayName": "Windows 64-bit (for 64-bit games)",
+      "generator": "Visual Studio 17 2022",
+      "architecture": {
+        "value": "x64",
+        "strategy": "set"
+      },
+      "binaryDir": "${sourceDir}/build/win64",
+      "cacheVariables": {
+        "DMC_XINPUT_DLL": "xinput1_4"
+      }
     },
     {
       "name": "tests-only",
@@ -21,14 +41,54 @@
     }
   ],
   "buildPresets": [
-    { "name": "win32-release", "configurePreset": "win32", "configuration": "Release" },
-    { "name": "win32-debug",   "configurePreset": "win32", "configuration": "Debug" },
-    { "name": "tests-only",    "configurePreset": "tests-only" }
+    {
+      "name": "win32-release",
+      "configurePreset": "win32",
+      "configuration": "Release"
+    },
+    {
+      "name": "win32-debug",
+      "configurePreset": "win32",
+      "configuration": "Debug"
+    },
+    {
+      "name": "tests-only",
+      "configurePreset": "tests-only"
+    },
+    {
+      "name": "win64-release",
+      "configurePreset": "win64",
+      "configuration": "Release"
+    },
+    {
+      "name": "win64-debug",
+      "configurePreset": "win64",
+      "configuration": "Debug"
+    }
   ],
   "testPresets": [
-    { "name": "win32-release", "configurePreset": "win32", "configuration": "Release",
-      "output": { "outputOnFailure": true } },
-    { "name": "tests-only", "configurePreset": "tests-only",
-      "output": { "outputOnFailure": true } }
+    {
+      "name": "win32-release",
+      "configurePreset": "win32",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "win64-release",
+      "configurePreset": "win64",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "tests-only",
+      "configurePreset": "tests-only",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
   ]
 }
